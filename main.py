@@ -520,9 +520,13 @@ else:
 
             if not is_sigungu_view:
                 # -------- 시/도만 선택: 소속 시/군/구 전체를 자동으로 비교 --------
-                st.caption(f"'{selected_sido_name}'에 속한 시/군/구별 계절 방문객수를 자동으로 비교해서 보여줍니다.")
+                st.caption(
+                    f"'{selected_sido_name}'에 속한 시/군/구별 방문객수를 "
+                    "현지인/외지인/외국인 구분으로 자동으로 비교해서 보여줍니다."
+                )
 
-                group_summary = sido_df.groupby(["signguNm", "계절"], as_index=False)["touNum"].sum()
+                # 시/군/구 x 관광객구분(현지인/외지인/외국인)별로 합산합니다 (계절은 합쳐서 연간 합계로 봅니다).
+                group_summary = sido_df.groupby(["signguNm", "touDivNm"], as_index=False)["touNum"].sum()
                 # 방문객수 총합이 많은 시/군/구부터 보이도록 정렬합니다.
                 sigungu_order = (
                     group_summary.groupby("signguNm")["touNum"].sum().sort_values(ascending=False).index.tolist()
@@ -532,11 +536,11 @@ else:
                     group_summary,
                     x="signguNm",
                     y="touNum",
-                    color="계절",
+                    color="touDivNm",
                     barmode="stack",
-                    category_orders={"signguNm": sigungu_order, "계절": SEASON_ORDER},
-                    labels={"touNum": "방문객수(명)", "signguNm": "시/군/구", "계절": "계절"},
-                    title=f"{selected_sido_name} 시/군/구별 '25년 계절 방문자수",
+                    category_orders={"signguNm": sigungu_order},
+                    labels={"touNum": "방문객수(명)", "signguNm": "시/군/구", "touDivNm": "관광객 구분"},
+                    title=f"{selected_sido_name} 시/군/구별 '25년 방문자수 (현지인·외지인·외국인)",
                 )
                 fig.update_layout(
                     margin=dict(l=10, r=10, t=50, b=10),
