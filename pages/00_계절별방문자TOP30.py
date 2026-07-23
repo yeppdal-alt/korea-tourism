@@ -99,6 +99,56 @@ df["지역명"] = df["시도"].fillna("") + " " + df["signguNm"]
 # 지역(시/군/구) x 계절별로 방문객수(외지인+외국인 합계)를 합산합니다.
 season_region_total = df.groupby(["계절", "지역명"], as_index=False)["touNum"].sum()
 
+# -----------------------------------------------------------
+# 데이터 점검용 패널: 특정 시/도가 TOP30에 안 보일 때, 실제로 데이터가 있는지 /
+# 몇 위 정도인지 / 30위 커트라인이 얼마인지를 직접 확인할 수 있게 해줍니다.
+# (기본은 접혀 있고, 눌러야 펼쳐지는 expander라 평소 화면은 그대로입니다)
+# -----------------------------------------------------------
+with st.expander("🔍 특정 시/도 데이터 점검하기 (TOP30에 안 보이는 이유 확인용)"):
+    checkable_sido_names = sorted(
+        name for name in STANDARD_SIDO_CODE if name not in EXCLUDED_SIDO_NAMES
+    )
+    check_sido_name = st.selectbox("점검할 시/도를 선택하세요", checkable_sido_names, key="debug_sido")
+
+    check_rows = df[df["시도"] == check_sido_name]
+    if check_rows.empty:
+        st.warning(
+            f"불러온 데이터 안에 '{check_sido_name}' 데이터가 없습니다. "
+            "(API 응답 자체에 데이터가 없거나 지역 코드 매칭에 문제가 있을 수 있습니다)"
+        )
+    else:
+        st.write(f"'{check_sido_name}' 시/군/구 수(데이터 기준): {check_rows['signguNm'].nunique()}개")
+
+        rank_rows = []
+        for season in SEASON_ORDER:
+            season_all = (
+                season_region_total[season_region_total["계절"] == season]
+                .sort_values("touNum", ascending=False)
+                .reset_index(drop=True)
+            )
+            season_all["순위"] = season_all.index + 1
+            in_sido = season_all[season_all["지역명"].str.startswith(check_sido_name)]
+            cutoff_value = season_all.iloc[TOP_N - 1]["touNum"] if len(season_all) >= TOP_N else None
+
+            if in_sido.empty:
+                rank_rows.append({"계절": season, "최고 지역": "-", "방문객수": "-", "전체 순위": "-", f"TOP{TOP_N} 커트라인": f"{cutoff_value:,.0f}" if cutoff_value else "-"})
+            else:
+                best = in_sido.iloc[0]
+                rank_rows.append(
+                    {
+                        "계절": season,
+                        "최고 지역": best["지역명"],
+                        "방문객수": f"{best['touNum']:,.0f}",
+                        "전체 순위": f"{int(best['순위'])}위",
+                        f"TOP{TOP_N} 커트라인": f"{cutoff_value:,.0f}" if cutoff_value else "-",
+                    }
+                )
+        st.dataframe(pd.DataFrame(rank_rows), use_container_width=True, hide_index=True)
+        st.caption(
+            "'전체 순위'가 TOP30 커트라인보다 낮은 숫자(더 위 순위)면 그래프에 보이고, "
+            "더 큰 숫자(더 아래 순위)면 데이터는 있지만 다른 지역보다 방문객수가 적어 TOP30 밖으로 밀린 것입니다."
+        )
+
 st.markdown("---")
 
 # 계절 4개를 2행 x 2열로 배치해서 한눈에 비교할 수 있게 보여줍니다.
