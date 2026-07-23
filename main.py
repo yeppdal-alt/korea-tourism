@@ -678,22 +678,17 @@ tab_festival, tab_stay, tab_detail = st.tabs(
 # ===========================================================
 # 탭 1) 행사정보 (searchFestival2)
 # ===========================================================
+FESTIVAL_YEAR = 2025  # 행사정보는 2025년 데이터만 조회합니다.
+
 with tab_festival:
     st.subheader(f"'{location_label}' 지역의 행사정보")
-    st.caption("날짜를 직접 입력하는 대신, 연도와 계절을 선택하면 해당 기간의 행사정보를 조회합니다.")
+    st.caption("2025년 데이터를 기준으로, 계절을 선택하면 해당 기간의 행사정보를 조회합니다.")
 
-    col_year, col_season = st.columns(2)
+    # 계절 선택 (연도는 2025년으로 고정)
+    selected_season = st.selectbox("계절을 선택하세요", list(SEASON_MONTHS.keys()))
 
-    # 연도 선택 (작년 ~ 내년+1 범위로 제공, 기본값은 올해)
-    current_year = pd.Timestamp.today().year
-    year_options = list(range(current_year - 1, current_year + 3))
-    selected_year = col_year.selectbox("연도를 선택하세요", year_options, index=year_options.index(current_year))
-
-    # 계절 선택
-    selected_season = col_season.selectbox("계절을 선택하세요", list(SEASON_MONTHS.keys()))
-
-    # 선택한 연도 + 계절을 실제 날짜 범위로 변환 (겨울은 다음 해 2월까지 자동 계산)
-    season_start, season_end = get_season_date_range(selected_year, selected_season)
+    # 선택한 계절을 실제 날짜 범위로 변환 (겨울은 2026년 2월까지 자동 계산)
+    season_start, season_end = get_season_date_range(FESTIVAL_YEAR, selected_season)
     st.caption(f"📅 조회 기간: {season_start.strftime('%Y년 %m월 %d일')} ~ {season_end.strftime('%Y년 %m월 %d일')}")
 
     if st.button("행사정보 조회", key="btn_festival"):
@@ -702,6 +697,7 @@ with tab_festival:
             "eventStartDate": season_start.strftime("%Y%m%d"),
             "eventEndDate": season_end.strftime("%Y%m%d"),
             "arrange": "A",  # A: 제목순 정렬
+            "numOfRows": 100,  # 계절(최대 3개월) 범위라 기본 30건보다 넉넉하게 받아옵니다.
         }
         # 시/군/구까지 선택한 경우에만 sigunguCode를 추가합니다.
         if selected_sigungu_code:
@@ -718,9 +714,12 @@ with tab_festival:
             if "eventstartdate" in df.columns:
                 df = df.sort_values("eventstartdate")
             st.dataframe(df[show_cols], use_container_width=True)
-            st.caption(f"총 {len(df)}건의 행사가 {selected_season.split(' ')[1]}({selected_year}년 기준) 기간에 조회되었습니다.")
+            st.caption(f"총 {len(df)}건의 행사가 {selected_season.split(' ')[1]}(2025년 기준) 기간에 조회되었습니다.")
         else:
-            st.info("해당 계절 기간에 조회된 행사정보가 없습니다.")
+            st.info(
+                "해당 계절 기간에 조회된 행사정보가 없습니다. "
+                "(선택한 지역·기간에 등록된 행사가 실제로 없을 수 있습니다. 다른 지역이나 계절로 다시 시도해보세요.)"
+            )
 
 
 # ===========================================================
