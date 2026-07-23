@@ -3,13 +3,13 @@
 # -----------------------------------------------------------
 # 이 앱은 한국관광공사 TourAPI(KorService2)를 이용해서
 # 시/도 + 시/군/구를 선택하면 아래 정보들을 조회해주는 스트림릿 대시보드입니다.
-#   0) 선택한 지역 위치를 대한민국 지도 위에 표시
+#   0) 선택한 지역 위치를 대한민국 지도 위에 표시 (작게, 한글 지명 표시)
+#   0-1) 계절별 방문객수 그래프 (DataLabService /metcoRegnVisitrDDList, /locgoRegnVisitrDDList)
 #   1) 행사정보      (/searchFestival2)
 #   2) 숙박정보      (/searchStay2)
 #   3) 공통정보      (/detailCommon2)
 #   4) 개요정보      (/detailCommon2 의 overview 항목)
 #   5) 반려동물 동반 여행정보 (/detailPetTour2)
-#   6) 계절별 방문객수 그래프 (DataLabService /metcoRegnVisitrDDList)
 #
 # 인증키(서비스키)는 절대 코드에 직접 쓰지 않고,
 # 스트림릿 클라우드의 "Secrets"(비밀 금고)에서 불러옵니다.
@@ -150,6 +150,29 @@ REGION_NAME_PREFIXES = {
     "전라북도": ["전라북", "전북"],
     "전라남도": ["전라남", "전남"],
     "제주도": ["제주"],
+}
+
+# 기초 지자체(시/군/구) 방문자수 데이터(signguCode)는 5자리 숫자이고,
+# 앞 2자리가 표준 시/도 코드입니다. 같은 이름의 시/군/구가 여러 시/도에 있을 수 있어
+# (예: "중구"는 서울/부산/대구 등에 모두 있음) 시/도 코드로 먼저 좁힌 뒤 이름을 매칭합니다.
+STANDARD_SIDO_CODE = {
+    "서울": "11",
+    "부산": "26",
+    "대구": "27",
+    "인천": "28",
+    "광주": "29",
+    "대전": "30",
+    "울산": "31",
+    "세종특별자치시": "36",
+    "경기도": "41",
+    "강원도": "42",
+    "충청북도": "43",
+    "충청남도": "44",
+    "전라북도": "45",
+    "전라남도": "46",
+    "경상북도": "47",
+    "경상남도": "48",
+    "제주도": "50",
 }
 
 # 월(1~12) -> 계절 매핑 (봄:3~5월, 여름:6~8월, 가을:9~11월, 겨울:12~2월)
@@ -446,6 +469,21 @@ def get_metco_visitor_year(year: int):
     return fetch_datalab_items("metcoRegnVisitrDDList", start_ymd, end_ymd)
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_locgo_visitor_year(year: int):
+    """
+    기초 지자체(시/군/구) 단위 방문자수 데이터를 특정 연도 1년치 통째로 가져옵니다.
+    전국 모든 시/군/구 데이터를 하루 단위로 담고 있어 데이터 양이 매우 많으므로,
+    (시/도 데이터보다 페이지 수를 훨씬 크게 잡아 가져옵니다)
+    같은 연도는 하루 동안 캐시해서 반복 호출을 막습니다.
+    """
+    start_ymd = f"{year}0101"
+    end_ymd = f"{year}1231"
+    # 전국 시/군/구 x 365일 x 관광객구분(3) 데이터라 매우 많아서,
+    # 한 페이지에 최대한 많이 받아오고(page_size) 페이지 수 제한도 넉넉히 잡습니다.
+    return fetch_datalab_items("locgoRegnVisitrDDList", start_ymd, end_ymd, page_size=5000, max_pages=150)
+
+
 # ---------------------------------------------------------
 # 4. 화면 구성 - 사이드바 (지역 선택: 시/도 -> 시/군/구)
 # ---------------------------------------------------------
@@ -485,7 +523,7 @@ with st.sidebar:
     if not TOUR_API_KEY:
         st.error("⚠️ TOUR_API_KEY 시크릿이 설정되지 않았습니다.")
     if not TOURNUM_API_KEY:
-        st.warning("⚠️ TOURNUM_API_KEY 시크릿이 없으면 '계절별 방문객수' 탭을 사용할 수 없습니다.")
+        st.warning("⚠️ TOURNUM_API_KEY 시크릿이 없으면 '계절별 방문객수' 그래프를 사용할 수 없습니다.")
 
 
 # ---------------------------------------------------------
@@ -539,10 +577,101 @@ with info_col:
 
 
 # ---------------------------------------------------------
-# 6. 탭 구성
+# 6. 계절별 방문객수 (DataLabService)
+#    - 시/군/구를 선택하지 않았으면 시/도 단위(metcoRegnVisitrDDList)
+#    - 시/군/구까지 선택했으면 시/군/구 단위(locgoRegnVisitrDDList)
+#    - 연도는 선택하지 않고 2025년 데이터만 고정으로 보여줍니다.
 # ---------------------------------------------------------
-tab_festival, tab_stay, tab_detail, tab_visitor = st.tabs(
-    ["🎉 행사정보", "🏨 숙박정보", "📋 공통·개요·반려동물 정보", "📊 계절별 방문객수"]
+VISITOR_CHART_YEAR = 2025  # 방문객수 그래프는 2025년 데이터만 조회합니다.
+
+st.subheader(f"📊 '{location_label}' '25년 계절별 방문자수")
+
+if not TOURNUM_API_KEY:
+    st.error("⚠️ TOURNUM_API_KEY 시크릿이 설정되지 않았습니다. 스트림릿 클라우드 Secrets에 등록해주세요.")
+else:
+    is_sigungu_view = selected_sigungu_name != "전체"
+
+    if is_sigungu_view:
+        st.caption(
+            "한국관광공사 관광 빅데이터(DataLab)의 '기초 지자체 지역방문자수' 데이터를 활용합니다(2025년 기준). "
+            "시/군/구 단위는 전국 데이터 양이 매우 많아 처음 조회할 때 시간이 다소 걸릴 수 있어요."
+        )
+    else:
+        st.caption("한국관광공사 관광 빅데이터(DataLab)의 '광역 지자체 지역방문자수' 데이터를 활용합니다(2025년 기준).")
+
+    chart_year = VISITOR_CHART_YEAR
+    run_visitor_query = st.button("방문객수 조회", key="btn_visitor")
+
+    if run_visitor_query:
+        region_df = pd.DataFrame()
+
+        if not is_sigungu_view:
+            # -------- 시/도 단위 --------
+            with st.spinner("1년치 시/도 방문객수 데이터를 불러오는 중입니다..."):
+                yearly_items = get_metco_visitor_year(chart_year)
+
+            if yearly_items:
+                df = pd.DataFrame(yearly_items)
+                name_prefixes = REGION_NAME_PREFIXES.get(selected_sido_name, [selected_sido_name])
+                mask = df["areaNm"].apply(lambda name: any(str(name).startswith(p) for p in name_prefixes))
+                region_df = df[mask].copy()
+        else:
+            # -------- 시/군/구 단위 --------
+            with st.spinner("1년치 시/군/구 방문객수 데이터를 불러오는 중입니다... (전국 데이터라 오래 걸릴 수 있어요)"):
+                yearly_items = get_locgo_visitor_year(chart_year)
+
+            if yearly_items:
+                df = pd.DataFrame(yearly_items)
+                sido_prefix = STANDARD_SIDO_CODE.get(selected_sido_name)
+                # 1) 시/도 코드로 먼저 좁히고, 2) 시/군/구 이름이 정확히 같은 행만 남깁니다.
+                if sido_prefix:
+                    df = df[df["signguCode"].astype(str).str.startswith(sido_prefix)]
+                mask = df["signguNm"] == selected_sigungu_name
+                region_df = df[mask].copy()
+                if region_df.empty:
+                    # 이름 표기가 살짝 다를 수 있어(예: 공백 등) 부분일치로 한 번 더 시도합니다.
+                    mask = df["signguNm"].astype(str).str.contains(selected_sigungu_name, na=False)
+                    region_df = df[mask].copy()
+
+        if region_df.empty:
+            st.info("선택한 지역의 방문객수 데이터를 찾을 수 없습니다.")
+        else:
+            # 관광객수(touNum)는 숫자로, 기준연월일(baseYmd)의 월(月)로 계절을 구분합니다.
+            region_df["touNum"] = pd.to_numeric(region_df["touNum"], errors="coerce")
+            region_df["월"] = region_df["baseYmd"].astype(str).str[4:6].astype(int)
+            region_df["계절"] = region_df["월"].map(MONTH_TO_SEASON)
+
+            # 계절 x 관광객구분(현지인/외지인/외국인)별로 합산합니다.
+            season_summary = region_df.groupby(["계절", "touDivNm"], as_index=False)["touNum"].sum()
+
+            fig = px.bar(
+                season_summary,
+                x="계절",
+                y="touNum",
+                color="touDivNm",
+                barmode="stack",
+                category_orders={"계절": SEASON_ORDER},
+                labels={"touNum": "방문객수(명)", "계절": "계절", "touDivNm": "관광객 구분"},
+                title=f"{location_label} '25년 계절별 방문자수",
+            )
+            # 방문객수를 천단위 구분기호로, 소수점 없이 표시합니다.
+            fig.update_layout(margin=dict(l=10, r=10, t=50, b=10), yaxis_tickformat=",.0f")
+            fig.update_traces(hovertemplate="%{x}<br>%{fullData.name}: %{y:,.0f}명<extra></extra>")
+            st.plotly_chart(fig, use_container_width=True)
+
+            # 계절별 총합도 표로 함께 보여줍니다 (천단위 구분기호, 소수점 없이).
+            season_total = region_df.groupby("계절", as_index=False)["touNum"].sum()
+            season_total["계절"] = pd.Categorical(season_total["계절"], categories=SEASON_ORDER, ordered=True)
+            season_total = season_total.sort_values("계절")
+            season_total["총 방문객수(명)"] = season_total["touNum"].round(0).astype(int).map(lambda n: f"{n:,}")
+            st.dataframe(season_total[["계절", "총 방문객수(명)"]], use_container_width=True, hide_index=True)
+
+
+# ---------------------------------------------------------
+# 7. 탭 구성
+# ---------------------------------------------------------
+tab_festival, tab_stay, tab_detail = st.tabs(
+    ["🎉 행사정보", "🏨 숙박정보", "📋 공통·개요·반려동물 정보"]
 )
 
 
@@ -760,75 +889,8 @@ with tab_detail:
         st.info("먼저 '목록 조회' 버튼을 눌러 콘텐츠 목록을 불러오세요.")
 
 
-# ===========================================================
-# 탭 4) 계절별 방문객수 (DataLabService /metcoRegnVisitrDDList)
-# ===========================================================
-with tab_visitor:
-    st.subheader(f"'{selected_sido_name}' 지역의 계절별 방문객수")
-    st.caption(
-        "한국관광공사 관광 빅데이터(DataLab)의 '광역 지자체 지역방문자수' 데이터를 활용합니다. "
-        "이 데이터는 시/도 단위로만 제공되어, 시/군/구를 선택해도 소속된 시/도 전체 값으로 표시됩니다."
-    )
-
-    if not TOURNUM_API_KEY:
-        st.error("⚠️ TOURNUM_API_KEY 시크릿이 설정되지 않았습니다. 스트림릿 클라우드 Secrets에 등록해주세요.")
-
-    current_year = pd.Timestamp.today().year
-    year_options = list(range(current_year - 1, current_year + 1))  # 방문자수는 과거 실측 데이터라 올해/작년 위주로 제공
-    chart_year = st.selectbox("연도를 선택하세요", year_options, index=len(year_options) - 1, key="visitor_year")
-
-    if st.button("방문객수 조회", key="btn_visitor"):
-        if not TOURNUM_API_KEY:
-            st.stop()
-
-        with st.spinner("1년치 방문객수 데이터를 불러오는 중입니다... (데이터 양이 많아 시간이 걸릴 수 있어요)"):
-            yearly_items = get_metco_visitor_year(chart_year)
-
-        if not yearly_items:
-            st.info("방문객수 데이터를 가져오지 못했습니다. 인증키 또는 API 상태를 확인해주세요.")
-        else:
-            df = pd.DataFrame(yearly_items)
-
-            # 선택한 시/도에 해당하는 데이터만 이름으로 걸러냅니다.
-            name_prefixes = REGION_NAME_PREFIXES.get(selected_sido_name, [selected_sido_name])
-            region_mask = df["areaNm"].apply(lambda name: any(str(name).startswith(p) for p in name_prefixes))
-            region_df = df[region_mask].copy()
-
-            if region_df.empty:
-                st.info("선택한 지역의 방문객수 데이터를 찾을 수 없습니다.")
-            else:
-                # 관광객수(touNum)는 숫자로, 기준연월일(baseYmd)의 월(月)로 계절을 구분합니다.
-                region_df["touNum"] = pd.to_numeric(region_df["touNum"], errors="coerce")
-                region_df["월"] = region_df["baseYmd"].astype(str).str[4:6].astype(int)
-                region_df["계절"] = region_df["월"].map(MONTH_TO_SEASON)
-
-                # 계절 x 관광객구분(현지인/외지인/외국인)별로 합산합니다.
-                season_summary = (
-                    region_df.groupby(["계절", "touDivNm"], as_index=False)["touNum"].sum()
-                )
-
-                fig = px.bar(
-                    season_summary,
-                    x="계절",
-                    y="touNum",
-                    color="touDivNm",
-                    barmode="stack",
-                    category_orders={"계절": SEASON_ORDER},
-                    labels={"touNum": "방문객수(명)", "계절": "계절", "touDivNm": "관광객 구분"},
-                    title=f"{selected_sido_name} 계절별 방문객수 ({chart_year}년)",
-                )
-                fig.update_layout(margin=dict(l=10, r=10, t=50, b=10))
-                st.plotly_chart(fig, use_container_width=True)
-
-                # 계절별 총합도 표로 함께 보여줍니다.
-                season_total = region_df.groupby("계절", as_index=False)["touNum"].sum()
-                season_total["계절"] = pd.Categorical(season_total["계절"], categories=SEASON_ORDER, ordered=True)
-                season_total = season_total.sort_values("계절").rename(columns={"touNum": "총 방문객수(명)"})
-                st.dataframe(season_total, use_container_width=True, hide_index=True)
-
-
 # ---------------------------------------------------------
-# 7. 하단 안내
+# 8. 하단 안내
 # ---------------------------------------------------------
 st.markdown("---")
 st.caption(
