@@ -678,7 +678,7 @@ else:
                     "<tr>"
                     f"{season_cell}"
                     f'<td style="text-align:center;">{row["월"]}</td>'
-                    f'<td style="text-align:right;">{row["총 방문객수(명)"]}</td>'
+                    f'<td style="text-align:center;">{row["총 방문객수(명)"]}</td>'
                     "</tr>"
                 )
 
@@ -688,6 +688,8 @@ else:
                 .season-visitor-table th, .season-visitor-table td {{
                     border: 1px solid rgba(128,128,128,0.3);
                     padding: 6px 10px;
+                    text-align: center;
+                    vertical-align: middle;
                 }}
                 .season-visitor-table th {{ background-color: rgba(128,128,128,0.15); }}
             </style>
