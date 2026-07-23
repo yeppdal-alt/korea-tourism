@@ -797,9 +797,9 @@ with tab_detail:
                     "detailCommon2",
                     {
                         "contentId": selected_content_id,
-                        "contentTypeId": selected_content_type,
+                        # detailCommon2는 contentId만으로 타입을 알아서 판별합니다.
+                        # contentTypeId를 같이 보내면 "INVALID_REQUEST_PARAMETER_ERROR"가 나는 경우가 있어 뺐습니다.
                         # defaultYN=Y만으로도 주소(addr1/addr2)·좌표(mapx/mapy) 등 기본 정보가 함께 내려옵니다.
-                        # addrinfoYN/mapinfoYN은 여행코스처럼 주소가 없는 콘텐츠 타입에서 오류가 나서 제외했습니다.
                         "defaultYN": "Y",   # 기본정보 포함
                         "overviewYN": "N",  # 개요는 별도 버튼에서 조회
                     },
@@ -851,7 +851,6 @@ with tab_detail:
                     "detailCommon2",
                     {
                         "contentId": selected_content_id,
-                        "contentTypeId": selected_content_type,
                         "defaultYN": "Y",
                         "overviewYN": "Y",  # 개요정보 포함 요청
                     },
