@@ -9,11 +9,13 @@
 #   3) 공통정보      (/detailCommon2)
 #   4) 개요정보      (/detailCommon2 의 overview 항목)
 #   5) 반려동물 동반 여행정보 (/detailPetTour2)
+#   6) 계절별 방문객수 그래프 (DataLabService /metcoRegnVisitrDDList)
 #
 # 인증키(서비스키)는 절대 코드에 직접 쓰지 않고,
 # 스트림릿 클라우드의 "Secrets"(비밀 금고)에서 불러옵니다.
 # .streamlit/secrets.toml 파일 또는 배포 설정의 Secrets 에
-#   TOUR_API_KEY = "여기에_발급받은_인증키"
+#   TOUR_API_KEY = "여기에_발급받은_TourAPI(KorService2) 인증키"
+#   TOURNUM_API_KEY = "여기에_발급받은_DataLabService(방문자수) 인증키"
 # 형태로 넣어두면 됩니다.
 # =========================================================
 
@@ -24,6 +26,7 @@ from datetime import date
 import streamlit as st
 import pandas as pd
 import requests
+import plotly.express as px
 
 # ---------------------------------------------------------
 # 1. 기본 설정
@@ -39,12 +42,20 @@ st.set_page_config(
 # TourAPI(KorService2)의 기본 주소(엔드포인트)
 BASE_URL = "https://apis.data.go.kr/B551011/KorService2"
 
+# 관광 빅데이터(방문자수) DataLabService의 기본 주소(엔드포인트)
+BASE_URL_DATALAB = "https://apis.data.go.kr/B551011/DataLabService"
+
 # 인증키는 코드에 직접 쓰지 않고 st.secrets 에서 불러옵니다.
-# 스트림릿 클라우드 배포 시 "Settings > Secrets"에 TOUR_API_KEY를 등록해야 합니다.
+# 스트림릿 클라우드 배포 시 "Settings > Secrets"에 아래 두 개의 키를 등록해야 합니다.
 try:
     TOUR_API_KEY = st.secrets["TOUR_API_KEY"]
 except Exception:
     TOUR_API_KEY = None
+
+try:
+    TOURNUM_API_KEY = st.secrets["TOURNUM_API_KEY"]
+except Exception:
+    TOURNUM_API_KEY = None
 
 
 # ---------------------------------------------------------
@@ -116,6 +127,39 @@ SEASON_MONTHS = {
     "🍂 가을 (9월~11월)": (9, 11),
     "❄️ 겨울 (12월~2월)": (12, 2),
 }
+
+
+# DataLabService의 방문자수 데이터는 areaNm(시도명)을 "서울특별시", "전라북도" 처럼
+# 정식 명칭으로 내려줍니다. 우리 앱의 시/도 이름(AREA_CODES의 key)과 매칭하기 위한 표입니다.
+# (지역 명칭이 개정되어도(예: 전라북도->전북특별자치도) 매칭되도록 여러 접두어를 등록해둡니다)
+REGION_NAME_PREFIXES = {
+    "서울": ["서울"],
+    "인천": ["인천"],
+    "대전": ["대전"],
+    "대구": ["대구"],
+    "광주": ["광주"],
+    "부산": ["부산"],
+    "울산": ["울산"],
+    "세종특별자치시": ["세종"],
+    "경기도": ["경기"],
+    "강원도": ["강원"],
+    "충청북도": ["충청북", "충북"],
+    "충청남도": ["충청남", "충남"],
+    "경상북도": ["경상북", "경북"],
+    "경상남도": ["경상남", "경남"],
+    "전라북도": ["전라북", "전북"],
+    "전라남도": ["전라남", "전남"],
+    "제주도": ["제주"],
+}
+
+# 월(1~12) -> 계절 매핑 (봄:3~5월, 여름:6~8월, 가을:9~11월, 겨울:12~2월)
+MONTH_TO_SEASON = {
+    3: "🌱 봄", 4: "🌱 봄", 5: "🌱 봄",
+    6: "☀️ 여름", 7: "☀️ 여름", 8: "☀️ 여름",
+    9: "🍂 가을", 10: "🍂 가을", 11: "🍂 가을",
+    12: "❄️ 겨울", 1: "❄️ 겨울", 2: "❄️ 겨울",
+}
+SEASON_ORDER = ["🌱 봄", "☀️ 여름", "🍂 가을", "❄️ 겨울"]
 
 
 def get_season_date_range(year: int, season_key: str):
@@ -327,6 +371,81 @@ def geocode_region(sido_name: str, sigungu_name: str = ""):
     return AREA_CENTER_COORDS.get(sido_name)
 
 
+def fetch_datalab_items(operation: str, start_ymd: str, end_ymd: str, page_size: int = 1000, max_pages: int = 40) -> list:
+    """
+    DataLabService(관광 빅데이터 방문자수)의 특정 기능을 호출해서
+    페이지 단위로 나뉜 결과를 모두 모아 하나의 리스트로 돌려줍니다.
+    (하루치 데이터가 지역x관광객구분별로 나뉘어 있어 결과가 많을 수 있습니다)
+    """
+    if not TOURNUM_API_KEY:
+        return []
+
+    all_items = []
+    page_no = 1
+    total_count = None
+
+    while True:
+        params = {
+            "serviceKey": TOURNUM_API_KEY,
+            "MobileOS": "ETC",
+            "MobileApp": "TourDashboard",
+            "_type": "json",
+            "numOfRows": page_size,
+            "pageNo": page_no,
+            "startYmd": start_ymd,
+            "endYmd": end_ymd,
+        }
+
+        try:
+            response = request_with_retry(f"{BASE_URL_DATALAB}/{operation}", params, timeout=25, retries=2)
+            data = response.json()
+        except Exception:
+            break  # 실패하면 지금까지 모은 데이터만이라도 돌려줍니다.
+
+        try:
+            header = data["response"]["header"]
+            if header.get("resultCode") != "0000":
+                break
+
+            body = data["response"]["body"]
+            if total_count is None:
+                total_count = int(body.get("totalCount", 0) or 0)
+
+            items = body.get("items")
+            if not items or items == "":
+                break
+            item = items.get("item")
+            if item is None:
+                break
+            if isinstance(item, dict):
+                item = [item]
+            all_items.extend(item)
+        except (KeyError, TypeError, ValueError):
+            break
+
+        # 전체 결과를 다 모았거나, 페이지 요청이 너무 많아지면 중단합니다(안전장치).
+        if total_count is not None and len(all_items) >= total_count:
+            break
+        if page_no >= max_pages:
+            break
+        page_no += 1
+
+    return all_items
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_metco_visitor_year(year: int):
+    """
+    광역 지자체(시/도) 단위 방문자수 데이터를 특정 연도 1년치(1/1~12/31) 통째로 가져옵니다.
+    지역 필터가 없는 API라 한 번에 전국 데이터를 받아서, 화면에서 시/도만 골라 씁니다.
+    같은 연도는 하루 동안 캐시해두어 반복 조회 시 API를 다시 호출하지 않습니다.
+    (일일 트래픽이 1,000건으로 제한되어 있어 캐시가 중요합니다)
+    """
+    start_ymd = f"{year}0101"
+    end_ymd = f"{year}1231"
+    return fetch_datalab_items("metcoRegnVisitrDDList", start_ymd, end_ymd)
+
+
 # ---------------------------------------------------------
 # 4. 화면 구성 - 사이드바 (지역 선택: 시/도 -> 시/군/구)
 # ---------------------------------------------------------
@@ -365,6 +484,8 @@ with st.sidebar:
 
     if not TOUR_API_KEY:
         st.error("⚠️ TOUR_API_KEY 시크릿이 설정되지 않았습니다.")
+    if not TOURNUM_API_KEY:
+        st.warning("⚠️ TOURNUM_API_KEY 시크릿이 없으면 '계절별 방문객수' 탭을 사용할 수 없습니다.")
 
 
 # ---------------------------------------------------------
@@ -380,21 +501,48 @@ else:
     coords = AREA_CENTER_COORDS.get(selected_sido_name)
     location_label = selected_sido_name
 
-if coords:
-    lat, lon = coords
-    st.write(f"**현재 선택 지역:** {location_label}  (위도: {lat:.4f}, 경도: {lon:.4f})")
-    map_df = pd.DataFrame({"lat": [lat], "lon": [lon]})
-    # st.map은 스트림릿에 기본 내장된 지도 위젯이라 별도 라이브러리 설치가 필요 없습니다.
-    st.map(map_df, zoom=9, size=200)
-else:
-    st.info("선택한 지역의 좌표를 찾지 못했습니다.")
+# 지도를 화면 왼쪽의 좁은 칸(전체 폭의 약 1/4)에만 작게 표시하고,
+# 오른쪽 칸에는 위치 정보 텍스트를 보여줍니다.
+map_col, info_col = st.columns([1, 3])
+
+with map_col:
+    if coords:
+        lat, lon = coords
+        map_df = pd.DataFrame({"lat": [lat], "lon": [lon], "지명": [location_label]})
+
+        # Plotly의 오픈스트리트맵(OpenStreetMap) 타일을 사용합니다.
+        # 별도의 Mapbox 인증키 없이도 지도에 한글 지명이 표시됩니다.
+        map_fig = px.scatter_mapbox(
+            map_df,
+            lat="lat",
+            lon="lon",
+            hover_name="지명",
+            zoom=9,
+            height=220,  # 지도 세로 크기를 작게 설정
+        )
+        map_fig.update_traces(marker=dict(size=14, color="red"))
+        map_fig.update_layout(
+            mapbox_style="open-street-map",
+            margin=dict(l=0, r=0, t=0, b=0),  # 여백 최소화로 더 작게 보이게 함
+        )
+        st.plotly_chart(map_fig, use_container_width=True, config={"scrollZoom": False})
+    else:
+        st.info("좌표를 찾지 못했습니다.")
+
+with info_col:
+    if coords:
+        lat, lon = coords
+        st.write(f"**현재 선택 지역:** {location_label}")
+        st.write(f"위도: {lat:.4f} / 경도: {lon:.4f}")
+    else:
+        st.write("선택한 지역의 좌표를 찾지 못했습니다.")
 
 
 # ---------------------------------------------------------
 # 6. 탭 구성
 # ---------------------------------------------------------
-tab_festival, tab_stay, tab_detail = st.tabs(
-    ["🎉 행사정보", "🏨 숙박정보", "📋 공통·개요·반려동물 정보"]
+tab_festival, tab_stay, tab_detail, tab_visitor = st.tabs(
+    ["🎉 행사정보", "🏨 숙박정보", "📋 공통·개요·반려동물 정보", "📊 계절별 방문객수"]
 )
 
 
@@ -537,12 +685,27 @@ with tab_detail:
                 if info.get("firstimage"):
                     st.image(info.get("firstimage"), width=400)
 
-                # 이 콘텐츠의 좌표(mapx=경도, mapy=위도)가 있으면 지도에도 표시합니다.
+                # 이 콘텐츠의 좌표(mapx=경도, mapy=위도)가 있으면 작은 지도로도 표시합니다.
                 if info.get("mapx") and info.get("mapy"):
                     try:
                         item_lon = float(info["mapx"])
                         item_lat = float(info["mapy"])
-                        st.map(pd.DataFrame({"lat": [item_lat], "lon": [item_lon]}), zoom=13, size=100)
+                        item_map_col, _ = st.columns([1, 3])  # 지도를 좁은 칸에 작게 표시
+                        with item_map_col:
+                            item_map_fig = px.scatter_mapbox(
+                                pd.DataFrame({"lat": [item_lat], "lon": [item_lon], "지명": [info.get("title", "")]}),
+                                lat="lat",
+                                lon="lon",
+                                hover_name="지명",
+                                zoom=13,
+                                height=200,
+                            )
+                            item_map_fig.update_traces(marker=dict(size=14, color="red"))
+                            item_map_fig.update_layout(
+                                mapbox_style="open-street-map",
+                                margin=dict(l=0, r=0, t=0, b=0),
+                            )
+                            st.plotly_chart(item_map_fig, use_container_width=True, config={"scrollZoom": False})
                     except (TypeError, ValueError):
                         pass
 
@@ -597,11 +760,79 @@ with tab_detail:
         st.info("먼저 '목록 조회' 버튼을 눌러 콘텐츠 목록을 불러오세요.")
 
 
+# ===========================================================
+# 탭 4) 계절별 방문객수 (DataLabService /metcoRegnVisitrDDList)
+# ===========================================================
+with tab_visitor:
+    st.subheader(f"'{selected_sido_name}' 지역의 계절별 방문객수")
+    st.caption(
+        "한국관광공사 관광 빅데이터(DataLab)의 '광역 지자체 지역방문자수' 데이터를 활용합니다. "
+        "이 데이터는 시/도 단위로만 제공되어, 시/군/구를 선택해도 소속된 시/도 전체 값으로 표시됩니다."
+    )
+
+    if not TOURNUM_API_KEY:
+        st.error("⚠️ TOURNUM_API_KEY 시크릿이 설정되지 않았습니다. 스트림릿 클라우드 Secrets에 등록해주세요.")
+
+    current_year = pd.Timestamp.today().year
+    year_options = list(range(current_year - 1, current_year + 1))  # 방문자수는 과거 실측 데이터라 올해/작년 위주로 제공
+    chart_year = st.selectbox("연도를 선택하세요", year_options, index=len(year_options) - 1, key="visitor_year")
+
+    if st.button("방문객수 조회", key="btn_visitor"):
+        if not TOURNUM_API_KEY:
+            st.stop()
+
+        with st.spinner("1년치 방문객수 데이터를 불러오는 중입니다... (데이터 양이 많아 시간이 걸릴 수 있어요)"):
+            yearly_items = get_metco_visitor_year(chart_year)
+
+        if not yearly_items:
+            st.info("방문객수 데이터를 가져오지 못했습니다. 인증키 또는 API 상태를 확인해주세요.")
+        else:
+            df = pd.DataFrame(yearly_items)
+
+            # 선택한 시/도에 해당하는 데이터만 이름으로 걸러냅니다.
+            name_prefixes = REGION_NAME_PREFIXES.get(selected_sido_name, [selected_sido_name])
+            region_mask = df["areaNm"].apply(lambda name: any(str(name).startswith(p) for p in name_prefixes))
+            region_df = df[region_mask].copy()
+
+            if region_df.empty:
+                st.info("선택한 지역의 방문객수 데이터를 찾을 수 없습니다.")
+            else:
+                # 관광객수(touNum)는 숫자로, 기준연월일(baseYmd)의 월(月)로 계절을 구분합니다.
+                region_df["touNum"] = pd.to_numeric(region_df["touNum"], errors="coerce")
+                region_df["월"] = region_df["baseYmd"].astype(str).str[4:6].astype(int)
+                region_df["계절"] = region_df["월"].map(MONTH_TO_SEASON)
+
+                # 계절 x 관광객구분(현지인/외지인/외국인)별로 합산합니다.
+                season_summary = (
+                    region_df.groupby(["계절", "touDivNm"], as_index=False)["touNum"].sum()
+                )
+
+                fig = px.bar(
+                    season_summary,
+                    x="계절",
+                    y="touNum",
+                    color="touDivNm",
+                    barmode="stack",
+                    category_orders={"계절": SEASON_ORDER},
+                    labels={"touNum": "방문객수(명)", "계절": "계절", "touDivNm": "관광객 구분"},
+                    title=f"{selected_sido_name} 계절별 방문객수 ({chart_year}년)",
+                )
+                fig.update_layout(margin=dict(l=10, r=10, t=50, b=10))
+                st.plotly_chart(fig, use_container_width=True)
+
+                # 계절별 총합도 표로 함께 보여줍니다.
+                season_total = region_df.groupby("계절", as_index=False)["touNum"].sum()
+                season_total["계절"] = pd.Categorical(season_total["계절"], categories=SEASON_ORDER, ordered=True)
+                season_total = season_total.sort_values("계절").rename(columns={"touNum": "총 방문객수(명)"})
+                st.dataframe(season_total, use_container_width=True, hide_index=True)
+
+
 # ---------------------------------------------------------
 # 7. 하단 안내
 # ---------------------------------------------------------
 st.markdown("---")
 st.caption(
-    "데이터 출처: 한국관광공사 TourAPI(KorService2) · 위치 좌표: OpenStreetMap Nominatim · "
-    "본 대시보드는 공공데이터포털에서 발급받은 인증키가 필요합니다."
+    "데이터 출처: 한국관광공사 TourAPI(KorService2), 관광 빅데이터 DataLabService · "
+    "위치 좌표: OpenStreetMap Nominatim · "
+    "본 대시보드는 공공데이터포털에서 발급받은 인증키(TOUR_API_KEY, TOURNUM_API_KEY)가 필요합니다."
 )
