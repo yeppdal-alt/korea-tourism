@@ -798,9 +798,9 @@ with tab_detail:
                     {
                         "contentId": selected_content_id,
                         "contentTypeId": selected_content_type,
+                        # defaultYN=Y만으로도 주소(addr1/addr2)·좌표(mapx/mapy) 등 기본 정보가 함께 내려옵니다.
+                        # addrinfoYN/mapinfoYN은 여행코스처럼 주소가 없는 콘텐츠 타입에서 오류가 나서 제외했습니다.
                         "defaultYN": "Y",   # 기본정보 포함
-                        "addrinfoYN": "Y",  # 주소정보 포함
-                        "mapinfoYN": "Y",   # 좌표정보 포함
                         "overviewYN": "N",  # 개요는 별도 버튼에서 조회
                     },
                 )
