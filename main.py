@@ -5,11 +5,12 @@
 # 시/도 + 시/군/구를 선택하면 아래 정보들을 조회해주는 스트림릿 대시보드입니다.
 #   0) 선택한 지역 위치를 대한민국 지도 위에 표시 (작게, 한글 지명 표시)
 #   0-1) 계절별 방문객수 그래프 (DataLabService /metcoRegnVisitrDDList, /locgoRegnVisitrDDList)
-#   1) 행사정보      (/searchFestival2)
-#   2) 숙박정보      (/searchStay2)
-#   3) 공통정보      (/detailCommon2)
-#   4) 개요정보      (/detailCommon2 의 overview 항목)
-#   5) 반려동물 동반 여행정보 (/detailPetTour2)
+#   1) 숙박정보      (/searchStay2)
+#   2) 공통정보      (/detailCommon2)
+#   3) 개요정보      (/detailCommon2 의 overview 항목)
+#   4) 반려동물 동반 여행정보 (/detailPetTour2)
+#
+# ※ 행사정보(searchFestival2)는 API 응답이 계속 불안정하게 에러가 나서 이 버전에서는 뺐습니다.
 #
 # 인증키(서비스키)는 절대 코드에 직접 쓰지 않고,
 # 스트림릿 클라우드의 "Secrets"(비밀 금고)에서 불러옵니다.
@@ -20,8 +21,6 @@
 # =========================================================
 
 import time
-import calendar
-from datetime import date
 
 import streamlit as st
 import pandas as pd
@@ -119,16 +118,6 @@ CONTENT_TYPES = {
     "음식점": "39",
 }
 
-# 행사정보를 계절별로 조회하기 위한 계절 -> (시작월, 종료월) 매핑
-# 겨울은 12월에 시작해서 다음 해 2월에 끝나는 것으로 처리합니다.
-SEASON_MONTHS = {
-    "🌱 봄 (3월~5월)": (3, 5),
-    "☀️ 여름 (6월~8월)": (6, 8),
-    "🍂 가을 (9월~11월)": (9, 11),
-    "❄️ 겨울 (12월~2월)": (12, 2),
-}
-
-
 # DataLabService의 방문자수 데이터는 areaNm(시도명)을 "서울특별시", "전라북도" 처럼
 # 정식 명칭으로 내려줍니다. 우리 앱의 시/도 이름(AREA_CODES의 key)과 매칭하기 위한 표입니다.
 # (지역 명칭이 개정되어도(예: 전라북도->전북특별자치도) 매칭되도록 여러 접두어를 등록해둡니다)
@@ -184,24 +173,14 @@ MONTH_TO_SEASON = {
 }
 SEASON_ORDER = ["🌱 봄", "☀️ 여름", "🍂 가을", "❄️ 겨울"]
 
-
-def get_season_date_range(year: int, season_key: str):
-    """
-    선택한 연도와 계절을 실제 조회 시작일/종료일(date)로 변환합니다.
-    예: 2026년 겨울 -> 2026-12-01 ~ 2027-02-28
-    """
-    start_month, end_month = SEASON_MONTHS[season_key]
-    start_date = date(year, start_month, 1)
-
-    if start_month > end_month:
-        # 겨울처럼 해를 넘기는 계절 (12월 -> 다음 해 2월)
-        end_year = year + 1
-    else:
-        end_year = year
-
-    last_day_of_end_month = calendar.monthrange(end_year, end_month)[1]
-    end_date = date(end_year, end_month, last_day_of_end_month)
-    return start_date, end_date
+# 계절별 표를 월 단위로 펼쳐서 보여줄 때 사용할, 계절 안에서의 월 순서
+# (겨울은 12월이 먼저 오도록 숫자 순서가 아니라 계절 흐름 순서를 씁니다)
+SEASON_MONTH_ORDER = {
+    "🌱 봄": [3, 4, 5],
+    "☀️ 여름": [6, 7, 8],
+    "🍂 가을": [9, 10, 11],
+    "❄️ 겨울": [12, 1, 2],
+}
 
 
 # ---------------------------------------------------------
@@ -659,71 +638,37 @@ else:
             fig.update_traces(hovertemplate="%{x}<br>%{fullData.name}: %{y:,.0f}명<extra></extra>")
             st.plotly_chart(fig, use_container_width=True)
 
-            # 계절별 총합도 표로 함께 보여줍니다 (천단위 구분기호, 소수점 없이).
-            season_total = region_df.groupby("계절", as_index=False)["touNum"].sum()
-            season_total["계절"] = pd.Categorical(season_total["계절"], categories=SEASON_ORDER, ordered=True)
-            season_total = season_total.sort_values("계절")
-            season_total["총 방문객수(명)"] = season_total["touNum"].round(0).astype(int).map(lambda n: f"{n:,}")
-            st.dataframe(season_total[["계절", "총 방문객수(명)"]], use_container_width=True, hide_index=True)
+            # 아래 표는 계절 옆에 월 칸을 추가해서, 월별 합계까지 함께 보여줍니다.
+            month_total = region_df.groupby(["계절", "월"], as_index=False)["touNum"].sum()
+
+            # 겨울(12,1,2)처럼 숫자 순서가 아니라 계절이 흘러가는 순서로 정렬하기 위한 순번을 매깁니다.
+            month_order_lookup = {
+                (season, month): idx
+                for idx, (season, month) in enumerate(
+                    (season, month) for season in SEASON_ORDER for month in SEASON_MONTH_ORDER[season]
+                )
+            }
+            month_total["정렬순서"] = month_total.apply(
+                lambda row: month_order_lookup.get((row["계절"], row["월"]), 999), axis=1
+            )
+            month_total = month_total.sort_values("정렬순서")
+
+            month_total["월"] = month_total["월"].astype(str) + "월"
+            # 천단위 구분기호를 넣고 소수점은 표시하지 않습니다.
+            month_total["총 방문객수(명)"] = month_total["touNum"].round(0).astype(int).map(lambda n: f"{n:,}")
+            st.dataframe(month_total[["계절", "월", "총 방문객수(명)"]], use_container_width=True, hide_index=True)
 
 
 # ---------------------------------------------------------
 # 7. 탭 구성
 # ---------------------------------------------------------
-tab_festival, tab_stay, tab_detail = st.tabs(
-    ["🎉 행사정보", "🏨 숙박정보", "📋 공통·개요·반려동물 정보"]
+tab_stay, tab_detail = st.tabs(
+    ["🏨 숙박정보", "📋 공통·개요·반려동물 정보"]
 )
 
 
 # ===========================================================
-# 탭 1) 행사정보 (searchFestival2)
-# ===========================================================
-FESTIVAL_YEAR = 2025  # 행사정보는 2025년 데이터만 조회합니다.
-
-with tab_festival:
-    st.subheader(f"'{location_label}' 지역의 행사정보")
-    st.caption("2025년 데이터를 기준으로, 계절을 선택하면 해당 기간의 행사정보를 조회합니다.")
-
-    # 계절 선택 (연도는 2025년으로 고정)
-    selected_season = st.selectbox("계절을 선택하세요", list(SEASON_MONTHS.keys()))
-
-    # 선택한 계절을 실제 날짜 범위로 변환 (겨울은 2026년 2월까지 자동 계산)
-    season_start, season_end = get_season_date_range(FESTIVAL_YEAR, selected_season)
-    st.caption(f"📅 조회 기간: {season_start.strftime('%Y년 %m월 %d일')} ~ {season_end.strftime('%Y년 %m월 %d일')}")
-
-    if st.button("행사정보 조회", key="btn_festival"):
-        params = {
-            "areaCode": selected_sido_code,
-            "eventStartDate": season_start.strftime("%Y%m%d"),
-            "eventEndDate": season_end.strftime("%Y%m%d"),
-            "arrange": "A",  # A: 제목순 정렬
-            "numOfRows": 100,  # 계절(최대 3개월) 범위라 기본 30건보다 넉넉하게 받아옵니다.
-        }
-        # 시/군/구까지 선택한 경우에만 sigunguCode를 추가합니다.
-        if selected_sigungu_code:
-            params["sigunguCode"] = selected_sigungu_code
-
-        with st.spinner("행사정보를 불러오는 중입니다..."):
-            festival_items = call_tour_api("searchFestival2", params)
-
-        if festival_items:
-            df = pd.DataFrame(festival_items)
-            # 화면에 보여줄 주요 컬럼만 정리 (없는 컬럼은 자동으로 무시)
-            show_cols = [c for c in ["title", "eventstartdate", "eventenddate", "addr1", "tel"] if c in df.columns]
-            # 행사 시작일 순으로 정렬해서 보여줍니다.
-            if "eventstartdate" in df.columns:
-                df = df.sort_values("eventstartdate")
-            st.dataframe(df[show_cols], use_container_width=True)
-            st.caption(f"총 {len(df)}건의 행사가 {selected_season.split(' ')[1]}(2025년 기준) 기간에 조회되었습니다.")
-        else:
-            st.info(
-                "해당 계절 기간에 조회된 행사정보가 없습니다. "
-                "(선택한 지역·기간에 등록된 행사가 실제로 없을 수 있습니다. 다른 지역이나 계절로 다시 시도해보세요.)"
-            )
-
-
-# ===========================================================
-# 탭 2) 숙박정보 (searchStay2)
+# 탭 1) 숙박정보 (searchStay2)
 # ===========================================================
 with tab_stay:
     st.subheader(f"'{location_label}' 지역의 숙박정보")
@@ -748,7 +693,7 @@ with tab_stay:
 
 
 # ===========================================================
-# 탭 3) 공통정보 / 개요정보 / 반려동물 동반 여행정보
+# 탭 2) 공통정보 / 개요정보 / 반려동물 동반 여행정보
 #       (지역기반 목록 조회 -> 항목 선택 -> 상세 조회)
 # ===========================================================
 with tab_detail:
