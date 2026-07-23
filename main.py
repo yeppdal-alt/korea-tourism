@@ -14,6 +14,12 @@
 #
 # ※ 행사정보(searchFestival2)는 API 응답이 계속 불안정하게 에러가 나서 이 버전에서는 뺐습니다.
 #
+# 이 앱은 여러 파일로 구성되어 있습니다 (모두 스트림릿 클라우드에 함께 올려야 합니다).
+#   - main.py          : 지금 이 파일. 앱의 첫 화면입니다.
+#   - datalab_utils.py : 방문자수 데이터 관련 공통 설정/함수 모음 (main.py와 pages/가 함께 씀)
+#   - pages/1_🌸_계절별_TOP10.py : "새 페이지" 기능. 스트림릿이 pages/ 폴더를 자동으로 인식해서
+#                                  사이드바에 페이지 전환 메뉴를 만들어줍니다.
+#
 # 인증키(서비스키)는 절대 코드에 직접 쓰지 않고,
 # 스트림릿 클라우드의 "Secrets"(비밀 금고)에서 불러옵니다.
 # .streamlit/secrets.toml 파일 또는 배포 설정의 Secrets 에
@@ -22,12 +28,22 @@
 # 형태로 넣어두면 됩니다.
 # =========================================================
 
-import time
-
 import streamlit as st
 import pandas as pd
 import requests
 import plotly.express as px
+
+# datalab_utils.py에 모아둔 공통 함수/상수를 불러옵니다.
+# (main.py와 pages/ 폴더의 페이지들이 이 파일을 함께 불러 씁니다)
+from datalab_utils import (
+    TOURNUM_API_KEY,
+    STANDARD_SIDO_CODE,
+    MONTH_TO_SEASON,
+    SEASON_ORDER,
+    SEASON_MONTH_ORDER,
+    request_with_retry,
+    get_locgo_visitor_year,
+)
 
 # ---------------------------------------------------------
 # 1. 기본 설정
@@ -43,20 +59,12 @@ st.set_page_config(
 # TourAPI(KorService2)의 기본 주소(엔드포인트)
 BASE_URL = "https://apis.data.go.kr/B551011/KorService2"
 
-# 관광 빅데이터(방문자수) DataLabService의 기본 주소(엔드포인트)
-BASE_URL_DATALAB = "https://apis.data.go.kr/B551011/DataLabService"
-
 # 인증키는 코드에 직접 쓰지 않고 st.secrets 에서 불러옵니다.
-# 스트림릿 클라우드 배포 시 "Settings > Secrets"에 아래 두 개의 키를 등록해야 합니다.
+# 스트림릿 클라우드 배포 시 "Settings > Secrets"에 TOUR_API_KEY와 TOURNUM_API_KEY를 등록해야 합니다.
 try:
     TOUR_API_KEY = st.secrets["TOUR_API_KEY"]
 except Exception:
     TOUR_API_KEY = None
-
-try:
-    TOURNUM_API_KEY = st.secrets["TOURNUM_API_KEY"]
-except Exception:
-    TOURNUM_API_KEY = None
 
 
 # ---------------------------------------------------------
@@ -120,74 +128,10 @@ CONTENT_TYPES = {
     "음식점": "39",
 }
 
-# 기초 지자체(시/군/구) 방문자수 데이터(signguCode)는 5자리 숫자이고,
-# 앞 2자리가 표준 시/도 코드입니다. 같은 이름의 시/군/구가 여러 시/도에 있을 수 있어
-# (예: "중구"는 서울/부산/대구 등에 모두 있음) 시/도 코드로 먼저 좁힌 뒤 이름을 매칭합니다.
-STANDARD_SIDO_CODE = {
-    "서울": "11",
-    "부산": "26",
-    "대구": "27",
-    "인천": "28",
-    "광주": "29",
-    "대전": "30",
-    "울산": "31",
-    "세종특별자치시": "36",
-    "경기도": "41",
-    "강원도": "42",
-    "충청북도": "43",
-    "충청남도": "44",
-    "전라북도": "45",
-    "전라남도": "46",
-    "경상북도": "47",
-    "경상남도": "48",
-    "제주도": "50",
-}
-
-# 월(1~12) -> 계절 매핑 (봄:3~5월, 여름:6~8월, 가을:9~11월, 겨울:12~2월)
-MONTH_TO_SEASON = {
-    3: "🌱 봄", 4: "🌱 봄", 5: "🌱 봄",
-    6: "☀️ 여름", 7: "☀️ 여름", 8: "☀️ 여름",
-    9: "🍂 가을", 10: "🍂 가을", 11: "🍂 가을",
-    12: "❄️ 겨울", 1: "❄️ 겨울", 2: "❄️ 겨울",
-}
-SEASON_ORDER = ["🌱 봄", "☀️ 여름", "🍂 가을", "❄️ 겨울"]
-
-# 계절별 표를 월 단위로 펼쳐서 보여줄 때 사용할, 계절 안에서의 월 순서
-# (겨울은 12월이 먼저 오도록 숫자 순서가 아니라 계절 흐름 순서를 씁니다)
-SEASON_MONTH_ORDER = {
-    "🌱 봄": [3, 4, 5],
-    "☀️ 여름": [6, 7, 8],
-    "🍂 가을": [9, 10, 11],
-    "❄️ 겨울": [12, 1, 2],
-}
-
-
 # ---------------------------------------------------------
 # 3. API 호출 공통 함수
+#    (request_with_retry, 방문자수 관련 함수/상수는 datalab_utils.py에서 불러옵니다)
 # ---------------------------------------------------------
-def request_with_retry(url: str, params: dict, headers: dict = None, timeout: int = 20, retries: int = 2):
-    """
-    공공데이터포털 서버가 가끔 응답이 느려서(Read timed out) 실패하는 경우를 대비해
-    같은 요청을 몇 번 더 시도해보는 함수입니다.
-
-    timeout: 한 번 요청에 최대로 기다리는 시간(초)
-    retries: 실패했을 때 추가로 재시도하는 횟수
-    """
-    last_error = None
-    for attempt in range(retries + 1):
-        try:
-            response = requests.get(url, params=params, headers=headers, timeout=timeout)
-            response.raise_for_status()
-            return response
-        except requests.exceptions.RequestException as e:
-            last_error = e
-            if attempt < retries:
-                time.sleep(1.5 * (attempt + 1))  # 재시도 전 잠깐 대기 (점점 길게)
-                continue
-    # 재시도까지 모두 실패하면 마지막 에러를 그대로 발생시킵니다.
-    raise last_error
-
-
 def call_tour_api(operation: str, extra_params: dict) -> list:
     """
     TourAPI(KorService2)의 특정 기능(operation)을 호출하고
@@ -350,83 +294,6 @@ def geocode_region(sido_name: str, sigungu_name: str = ""):
 
     # 지오코딩에 실패하면 시/도 대표 좌표라도 보여줍니다.
     return AREA_CENTER_COORDS.get(sido_name)
-
-
-def fetch_datalab_items(operation: str, start_ymd: str, end_ymd: str, page_size: int = 1000, max_pages: int = 40) -> list:
-    """
-    DataLabService(관광 빅데이터 방문자수)의 특정 기능을 호출해서
-    페이지 단위로 나뉜 결과를 모두 모아 하나의 리스트로 돌려줍니다.
-    (하루치 데이터가 지역x관광객구분별로 나뉘어 있어 결과가 많을 수 있습니다)
-    """
-    if not TOURNUM_API_KEY:
-        return []
-
-    all_items = []
-    page_no = 1
-    total_count = None
-
-    while True:
-        params = {
-            "serviceKey": TOURNUM_API_KEY,
-            "MobileOS": "ETC",
-            "MobileApp": "TourDashboard",
-            "_type": "json",
-            "numOfRows": page_size,
-            "pageNo": page_no,
-            "startYmd": start_ymd,
-            "endYmd": end_ymd,
-        }
-
-        try:
-            response = request_with_retry(f"{BASE_URL_DATALAB}/{operation}", params, timeout=25, retries=2)
-            data = response.json()
-        except Exception:
-            break  # 실패하면 지금까지 모은 데이터만이라도 돌려줍니다.
-
-        try:
-            header = data["response"]["header"]
-            if header.get("resultCode") != "0000":
-                break
-
-            body = data["response"]["body"]
-            if total_count is None:
-                total_count = int(body.get("totalCount", 0) or 0)
-
-            items = body.get("items")
-            if not items or items == "":
-                break
-            item = items.get("item")
-            if item is None:
-                break
-            if isinstance(item, dict):
-                item = [item]
-            all_items.extend(item)
-        except (KeyError, TypeError, ValueError):
-            break
-
-        # 전체 결과를 다 모았거나, 페이지 요청이 너무 많아지면 중단합니다(안전장치).
-        if total_count is not None and len(all_items) >= total_count:
-            break
-        if page_no >= max_pages:
-            break
-        page_no += 1
-
-    return all_items
-
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def get_locgo_visitor_year(year: int):
-    """
-    기초 지자체(시/군/구) 단위 방문자수 데이터를 특정 연도 1년치 통째로 가져옵니다.
-    전국 모든 시/군/구 데이터를 하루 단위로 담고 있어 데이터 양이 매우 많으므로,
-    (시/도 데이터보다 페이지 수를 훨씬 크게 잡아 가져옵니다)
-    같은 연도는 하루 동안 캐시해서 반복 호출을 막습니다.
-    """
-    start_ymd = f"{year}0101"
-    end_ymd = f"{year}1231"
-    # 전국 시/군/구 x 365일 x 관광객구분(3) 데이터라 매우 많아서,
-    # 한 페이지에 최대한 많이 받아오고(page_size) 페이지 수 제한도 넉넉히 잡습니다.
-    return fetch_datalab_items("locgoRegnVisitrDDList", start_ymd, end_ymd, page_size=5000, max_pages=150)
 
 
 # ---------------------------------------------------------
