@@ -2,7 +2,8 @@
 # 한국관광공사 위치기반 관광정보 대시보드 (main.py)
 # -----------------------------------------------------------
 # 이 앱은 한국관광공사 TourAPI(KorService2)를 이용해서
-# 지역을 선택하면 아래 정보들을 조회해주는 스트림릿 대시보드입니다.
+# 시/도 + 시/군/구를 선택하면 아래 정보들을 조회해주는 스트림릿 대시보드입니다.
+#   0) 선택한 지역 위치를 대한민국 지도 위에 표시
 #   1) 행사정보      (/searchFestival2)
 #   2) 숙박정보      (/searchStay2)
 #   3) 공통정보      (/detailCommon2)
@@ -43,10 +44,12 @@ except Exception:
 
 
 # ---------------------------------------------------------
-# 2. 지역 코드 / 콘텐츠 타입 코드 (TourAPI 공식 코드표)
+# 2. 지역 코드 (시/도) / 콘텐츠 타입 코드 (TourAPI 공식 코드표)
 # ---------------------------------------------------------
-# 지역코드조회(areaCode2)는 공식 문서상 "미사용 예정" 기능이라
-# 자주 바뀌지 않는 표준 시도 코드를 앱 안에 직접 정리해두었습니다.
+# 지역코드조회(areaCode2)는 공식 문서상 "미사용 예정" 표시가 있지만,
+# 시/군/구 목록을 동적으로 받아오기 위한 유일한 공식 방법이라 계속 사용합니다.
+# 시/도(대분류) 코드는 자주 바뀌지 않으므로 앱 안에 직접 정리해두었고,
+# 시/군/구(소분류) 목록은 아래 함수에서 API로 실시간 조회합니다.
 AREA_CODES = {
     "서울": "1",
     "인천": "2",
@@ -65,6 +68,28 @@ AREA_CODES = {
     "전라북도": "37",
     "전라남도": "38",
     "제주도": "39",
+}
+
+# 지도에 대략적인 위치를 바로 보여주기 위한 시/도 대표 좌표(위도, 경도)
+# (시/군/구를 선택하면 아래 geocode_region 함수가 더 정확한 좌표로 갱신합니다)
+AREA_CENTER_COORDS = {
+    "서울": (37.5665, 126.9780),
+    "인천": (37.4563, 126.7052),
+    "대전": (36.3504, 127.3845),
+    "대구": (35.8714, 128.6014),
+    "광주": (35.1595, 126.8526),
+    "부산": (35.1796, 129.0756),
+    "울산": (35.5384, 129.3114),
+    "세종특별자치시": (36.4801, 127.2890),
+    "경기도": (37.4138, 127.5183),
+    "강원도": (37.8228, 128.1555),
+    "충청북도": (36.6357, 127.4917),
+    "충청남도": (36.5184, 126.8000),
+    "경상북도": (36.4919, 128.8889),
+    "경상남도": (35.4606, 128.2132),
+    "전라북도": (35.7175, 127.1530),
+    "전라남도": (34.8161, 126.4629),
+    "제주도": (33.4996, 126.5312),
 }
 
 # 관광 콘텐츠 타입 코드 (공통정보/반려동물 조회 등에 사용)
@@ -87,6 +112,7 @@ def call_tour_api(operation: str, extra_params: dict) -> list:
     """
     TourAPI(KorService2)의 특정 기능(operation)을 호출하고
     결과 아이템 리스트를 돌려주는 공통 함수입니다.
+    화면에 에러 메시지를 보여주는 용도(버튼 클릭 시 조회)로 사용합니다.
 
     operation: 예) "searchFestival2", "searchStay2", "detailCommon2" 등
     extra_params: 각 기능별로 추가로 필요한 파라미터(딕셔너리)
@@ -158,17 +184,117 @@ def call_tour_api(operation: str, extra_params: dict) -> list:
         return []
 
 
+def fetch_area_code_items_silent(area_code: str = None) -> list:
+    """
+    areaCode2를 호출하는 조용한(에러 메시지를 화면에 띄우지 않는) 버전입니다.
+    시/군/구 목록처럼 화면이 그려질 때마다 자동으로 호출되는 곳에서 사용합니다.
+    """
+    if not TOUR_API_KEY:
+        return []
+
+    params = {
+        "serviceKey": TOUR_API_KEY,
+        "MobileOS": "ETC",
+        "MobileApp": "TourDashboard",
+        "_type": "json",
+        "numOfRows": 100,
+        "pageNo": 1,
+    }
+    if area_code:
+        params["areaCode"] = area_code
+
+    try:
+        response = requests.get(f"{BASE_URL}/areaCode2", params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        body = data["response"]["body"]
+        items = body.get("items")
+        if not items or items == "":
+            return []
+        item = items.get("item")
+        if item is None:
+            return []
+        if isinstance(item, dict):
+            return [item]
+        return item
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_sigungu_list(area_code: str):
+    """
+    선택한 시/도(area_code)에 속한 시/군/구 목록을 가져옵니다.
+    반복 조회를 줄이기 위해 1시간 동안 결과를 캐시(임시 저장)합니다.
+    반환값 예: {"강남구": "1", "강동구": "2", ...}
+    """
+    items = fetch_area_code_items_silent(area_code)
+    result = {}
+    for it in items:
+        name = it.get("name")
+        code = it.get("code")
+        if name and code:
+            result[name] = code
+    return result
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def geocode_region(sido_name: str, sigungu_name: str = ""):
+    """
+    시/도(+시/군/구) 이름으로 대략적인 위도/경도를 찾아옵니다.
+    OpenStreetMap의 무료 지오코딩 서비스(Nominatim)를 사용하며,
+    별도의 인증키가 필요 없습니다. 하루 동안 결과를 캐시합니다.
+    실패하면 시/도 대표 좌표(AREA_CENTER_COORDS)로 대신 사용합니다.
+    """
+    query = f"대한민국 {sido_name} {sigungu_name}".strip()
+    try:
+        response = requests.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": query, "format": "json", "limit": 1, "countrycodes": "kr"},
+            headers={"User-Agent": "streamlit-tour-dashboard (educational use)"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        results = response.json()
+        if results:
+            lat = float(results[0]["lat"])
+            lon = float(results[0]["lon"])
+            return lat, lon
+    except Exception:
+        pass
+
+    # 지오코딩에 실패하면 시/도 대표 좌표라도 보여줍니다.
+    return AREA_CENTER_COORDS.get(sido_name)
+
+
 # ---------------------------------------------------------
-# 4. 화면 구성 - 사이드바 (지역 선택)
+# 4. 화면 구성 - 사이드바 (지역 선택: 시/도 -> 시/군/구)
 # ---------------------------------------------------------
 st.title("🗺️ 한국관광공사 위치기반 관광정보 대시보드")
-st.caption("지역을 선택하고 원하는 정보 탭을 눌러 관광 정보를 조회하세요.")
+st.caption("시/도와 시/군/구를 선택하면 지도에 위치가 표시되고, 원하는 정보 탭에서 관광 정보를 조회할 수 있습니다.")
 
 with st.sidebar:
     st.header("🔎 검색 조건")
 
-    selected_area_name = st.selectbox("지역을 선택하세요", list(AREA_CODES.keys()))
-    selected_area_code = AREA_CODES[selected_area_name]
+    # 1단계: 시/도 선택
+    selected_sido_name = st.selectbox("시/도를 선택하세요", list(AREA_CODES.keys()))
+    selected_sido_code = AREA_CODES[selected_sido_name]
+
+    # 2단계: 선택한 시/도에 속한 시/군/구 목록을 API로 조회
+    with st.spinner("시/군/구 목록을 불러오는 중입니다..."):
+        sigungu_map = get_sigungu_list(selected_sido_code)
+
+    if sigungu_map:
+        sigungu_options = ["전체"] + list(sigungu_map.keys())
+    else:
+        sigungu_options = ["전체"]
+
+    selected_sigungu_name = st.selectbox("시/군/구를 선택하세요", sigungu_options)
+
+    if selected_sigungu_name == "전체":
+        selected_sigungu_code = None
+    else:
+        selected_sigungu_code = sigungu_map.get(selected_sigungu_name)
 
     st.markdown("---")
     st.caption(
@@ -182,7 +308,30 @@ with st.sidebar:
 
 
 # ---------------------------------------------------------
-# 5. 탭 구성
+# 5. 선택한 지역 위치를 대한민국 지도 위에 표시
+# ---------------------------------------------------------
+st.subheader("📍 선택한 지역 위치")
+
+# 시/군/구까지 선택했으면 더 정확한 좌표를, 시/도만 선택했으면 시/도 대표 좌표를 사용합니다.
+if selected_sigungu_name != "전체":
+    coords = geocode_region(selected_sido_name, selected_sigungu_name)
+    location_label = f"{selected_sido_name} {selected_sigungu_name}"
+else:
+    coords = AREA_CENTER_COORDS.get(selected_sido_name)
+    location_label = selected_sido_name
+
+if coords:
+    lat, lon = coords
+    st.write(f"**현재 선택 지역:** {location_label}  (위도: {lat:.4f}, 경도: {lon:.4f})")
+    map_df = pd.DataFrame({"lat": [lat], "lon": [lon]})
+    # st.map은 스트림릿에 기본 내장된 지도 위젯이라 별도 라이브러리 설치가 필요 없습니다.
+    st.map(map_df, zoom=9, size=200)
+else:
+    st.info("선택한 지역의 좌표를 찾지 못했습니다.")
+
+
+# ---------------------------------------------------------
+# 6. 탭 구성
 # ---------------------------------------------------------
 tab_festival, tab_stay, tab_detail = st.tabs(
     ["🎉 행사정보", "🏨 숙박정보", "📋 공통·개요·반려동물 정보"]
@@ -193,22 +342,24 @@ tab_festival, tab_stay, tab_detail = st.tabs(
 # 탭 1) 행사정보 (searchFestival2)
 # ===========================================================
 with tab_festival:
-    st.subheader(f"'{selected_area_name}' 지역의 행사정보")
+    st.subheader(f"'{location_label}' 지역의 행사정보")
 
     # 행사 시작일 기본값: 오늘 날짜
     event_start_date = st.date_input("행사 시작일(이후) 검색 기준", value=pd.Timestamp.today())
     event_start_str = event_start_date.strftime("%Y%m%d")
 
     if st.button("행사정보 조회", key="btn_festival"):
+        params = {
+            "areaCode": selected_sido_code,
+            "eventStartDate": event_start_str,
+            "arrange": "A",  # A: 제목순 정렬
+        }
+        # 시/군/구까지 선택한 경우에만 sigunguCode를 추가합니다.
+        if selected_sigungu_code:
+            params["sigunguCode"] = selected_sigungu_code
+
         with st.spinner("행사정보를 불러오는 중입니다..."):
-            festival_items = call_tour_api(
-                "searchFestival2",
-                {
-                    "areaCode": selected_area_code,
-                    "eventStartDate": event_start_str,
-                    "arrange": "A",  # A: 제목순 정렬
-                },
-            )
+            festival_items = call_tour_api("searchFestival2", params)
 
         if festival_items:
             df = pd.DataFrame(festival_items)
@@ -223,17 +374,18 @@ with tab_festival:
 # 탭 2) 숙박정보 (searchStay2)
 # ===========================================================
 with tab_stay:
-    st.subheader(f"'{selected_area_name}' 지역의 숙박정보")
+    st.subheader(f"'{location_label}' 지역의 숙박정보")
 
     if st.button("숙박정보 조회", key="btn_stay"):
+        params = {
+            "areaCode": selected_sido_code,
+            "arrange": "A",  # A: 제목순 정렬
+        }
+        if selected_sigungu_code:
+            params["sigunguCode"] = selected_sigungu_code
+
         with st.spinner("숙박정보를 불러오는 중입니다..."):
-            stay_items = call_tour_api(
-                "searchStay2",
-                {
-                    "areaCode": selected_area_code,
-                    "arrange": "A",  # A: 제목순 정렬
-                },
-            )
+            stay_items = call_tour_api("searchStay2", params)
 
         if stay_items:
             df = pd.DataFrame(stay_items)
@@ -248,23 +400,24 @@ with tab_stay:
 #       (지역기반 목록 조회 -> 항목 선택 -> 상세 조회)
 # ===========================================================
 with tab_detail:
-    st.subheader(f"'{selected_area_name}' 지역의 관광정보 상세 조회")
+    st.subheader(f"'{location_label}' 지역의 관광정보 상세 조회")
     st.caption("먼저 콘텐츠 타입을 선택해 목록을 검색하고, 아래에서 항목을 선택하세요.")
 
     selected_content_name = st.selectbox("콘텐츠 타입을 선택하세요", list(CONTENT_TYPES.keys()))
     selected_content_type = CONTENT_TYPES[selected_content_name]
 
     if st.button("목록 조회", key="btn_area_list"):
+        params = {
+            "areaCode": selected_sido_code,
+            "contentTypeId": selected_content_type,
+            "arrange": "A",
+        }
+        if selected_sigungu_code:
+            params["sigunguCode"] = selected_sigungu_code
+
         with st.spinner("목록을 불러오는 중입니다..."):
             # 지역기반 관광정보조회(areaBasedList2)로 콘텐츠 목록을 가져옵니다.
-            area_items = call_tour_api(
-                "areaBasedList2",
-                {
-                    "areaCode": selected_area_code,
-                    "contentTypeId": selected_content_type,
-                    "arrange": "A",
-                },
-            )
+            area_items = call_tour_api("areaBasedList2", params)
         # 세션 상태에 저장해서 버튼을 다시 눌러도 유지되게 합니다.
         st.session_state["area_items"] = area_items
 
@@ -307,6 +460,16 @@ with tab_detail:
                 st.write("**홈페이지:**", info.get("homepage", "-"))
                 if info.get("firstimage"):
                     st.image(info.get("firstimage"), width=400)
+
+                # 이 콘텐츠의 좌표(mapx=경도, mapy=위도)가 있으면 지도에도 표시합니다.
+                if info.get("mapx") and info.get("mapy"):
+                    try:
+                        item_lon = float(info["mapx"])
+                        item_lat = float(info["mapy"])
+                        st.map(pd.DataFrame({"lat": [item_lat], "lon": [item_lon]}), zoom=13, size=100)
+                    except (TypeError, ValueError):
+                        pass
+
                 with st.expander("전체 원본 데이터 보기"):
                     st.json(info)
             else:
@@ -359,10 +522,10 @@ with tab_detail:
 
 
 # ---------------------------------------------------------
-# 6. 하단 안내
+# 7. 하단 안내
 # ---------------------------------------------------------
 st.markdown("---")
 st.caption(
-    "데이터 출처: 한국관광공사 TourAPI(KorService2) · "
+    "데이터 출처: 한국관광공사 TourAPI(KorService2) · 위치 좌표: OpenStreetMap Nominatim · "
     "본 대시보드는 공공데이터포털에서 발급받은 인증키가 필요합니다."
 )
