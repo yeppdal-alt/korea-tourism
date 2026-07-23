@@ -104,7 +104,7 @@ season_region_total = df.groupby(["계절", "지역명"], as_index=False)["touNu
 # 몇 위 정도인지 / 30위 커트라인이 얼마인지를 직접 확인할 수 있게 해줍니다.
 # (기본은 접혀 있고, 눌러야 펼쳐지는 expander라 평소 화면은 그대로입니다)
 # -----------------------------------------------------------
-with st.expander("🔍 특정 시/도 데이터 점검하기 (TOP30에 안 보이는 이유 확인용)", expanded=True):
+with st.expander("🔍 특정 시/도 데이터 점검하기 (TOP30에 안 보이는 이유 확인용)"):
     checkable_sido_names = sorted(
         name for name in STANDARD_SIDO_CODE if name not in EXCLUDED_SIDO_NAMES
     )
