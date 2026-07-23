@@ -23,6 +23,7 @@ import plotly.express as px
 
 from datalab_utils import (
     TOURNUM_API_KEY,
+    STANDARD_SIDO_CODE,
     SIDO_CODE_TO_NAME,
     MONTH_TO_SEASON,
     SEASON_ORDER,
@@ -39,6 +40,13 @@ st.set_page_config(
 VISITOR_CHART_YEAR = 2025  # main.py와 동일하게 2025년 데이터만 사용합니다.
 TOP_N = 30  # 계절별로 보여줄 순위 개수
 
+# 서울/경기도처럼 원래도 사람이 많이 사는 "도심" 지역은 순위에서 빼고,
+# 관광객이 몰리는 지역 위주로 보기 위해 제외할 시/도 목록입니다.
+EXCLUDED_SIDO_NAMES = ["서울", "경기도"]
+EXCLUDED_SIDO_PREFIXES = tuple(
+    STANDARD_SIDO_CODE[name] for name in EXCLUDED_SIDO_NAMES if name in STANDARD_SIDO_CODE
+)
+
 # 계절마다 그래프 색을 다르게 주기 위한 그라데이션(연속 색상) 팔레트입니다.
 # 값이 클수록(방문객이 많을수록) 색이 진해지는 방식이라 순위가 한눈에 들어옵니다.
 SEASON_COLOR_SCALE = {
@@ -51,7 +59,7 @@ SEASON_COLOR_SCALE = {
 st.title("🌸 계절별 방문자 TOP30 (전국 시/군/구)")
 st.caption(
     "2025년 데이터를 기준으로, 계절별 '외지인 + 외국인' 방문객수가 가장 많았던 "
-    "전국 시/군/구 상위 30곳을 보여줍니다. (현지인 데이터는 제외)"
+    "전국 시/군/구 상위 30곳을 보여줍니다. (현지인 데이터는 제외, 서울·경기도는 순위에서 제외)"
 )
 
 if not TOURNUM_API_KEY:
@@ -77,6 +85,11 @@ df["계절"] = df["월"].map(MONTH_TO_SEASON)
 # 관광객구분(touDivNm)에서 "외지인"과 "외국인"만 남기고, 현지인은 제외합니다.
 # (touDivCd 기준: 1=현지인, 2=외지인, 3=외국인 이지만, 이름으로 걸러내는 것이 더 안전합니다)
 df = df[df["touDivNm"].isin(["외지인(b)", "외국인(c)"])].copy()
+
+# 서울/경기도처럼 원래 인구가 많은 도심 지역은 순위에서 제외합니다.
+# (signguCode 앞 2자리가 시/도 코드이므로, 이 코드로 시작하는 행을 걸러냅니다)
+if EXCLUDED_SIDO_PREFIXES:
+    df = df[~df["signguCode"].astype(str).str.startswith(EXCLUDED_SIDO_PREFIXES)].copy()
 
 # signguCode 앞 2자리로 시/도 이름을 찾아서 "서울 종로구"처럼 지역명을 만듭니다.
 # (전국 데이터다 보니 다른 시/도에 이름이 같은 시/군/구가 있을 수 있어 구분이 필요합니다)
