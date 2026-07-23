@@ -17,6 +17,10 @@
 # 형태로 넣어두면 됩니다.
 # =========================================================
 
+import time
+import calendar
+from datetime import date
+
 import streamlit as st
 import pandas as pd
 import requests
@@ -104,10 +108,61 @@ CONTENT_TYPES = {
     "음식점": "39",
 }
 
+# 행사정보를 계절별로 조회하기 위한 계절 -> (시작월, 종료월) 매핑
+# 겨울은 12월에 시작해서 다음 해 2월에 끝나는 것으로 처리합니다.
+SEASON_MONTHS = {
+    "🌱 봄 (3월~5월)": (3, 5),
+    "☀️ 여름 (6월~8월)": (6, 8),
+    "🍂 가을 (9월~11월)": (9, 11),
+    "❄️ 겨울 (12월~2월)": (12, 2),
+}
+
+
+def get_season_date_range(year: int, season_key: str):
+    """
+    선택한 연도와 계절을 실제 조회 시작일/종료일(date)로 변환합니다.
+    예: 2026년 겨울 -> 2026-12-01 ~ 2027-02-28
+    """
+    start_month, end_month = SEASON_MONTHS[season_key]
+    start_date = date(year, start_month, 1)
+
+    if start_month > end_month:
+        # 겨울처럼 해를 넘기는 계절 (12월 -> 다음 해 2월)
+        end_year = year + 1
+    else:
+        end_year = year
+
+    last_day_of_end_month = calendar.monthrange(end_year, end_month)[1]
+    end_date = date(end_year, end_month, last_day_of_end_month)
+    return start_date, end_date
+
 
 # ---------------------------------------------------------
 # 3. API 호출 공통 함수
 # ---------------------------------------------------------
+def request_with_retry(url: str, params: dict, headers: dict = None, timeout: int = 20, retries: int = 2):
+    """
+    공공데이터포털 서버가 가끔 응답이 느려서(Read timed out) 실패하는 경우를 대비해
+    같은 요청을 몇 번 더 시도해보는 함수입니다.
+
+    timeout: 한 번 요청에 최대로 기다리는 시간(초)
+    retries: 실패했을 때 추가로 재시도하는 횟수
+    """
+    last_error = None
+    for attempt in range(retries + 1):
+        try:
+            response = requests.get(url, params=params, headers=headers, timeout=timeout)
+            response.raise_for_status()
+            return response
+        except requests.exceptions.RequestException as e:
+            last_error = e
+            if attempt < retries:
+                time.sleep(1.5 * (attempt + 1))  # 재시도 전 잠깐 대기 (점점 길게)
+                continue
+    # 재시도까지 모두 실패하면 마지막 에러를 그대로 발생시킵니다.
+    raise last_error
+
+
 def call_tour_api(operation: str, extra_params: dict) -> list:
     """
     TourAPI(KorService2)의 특정 기능(operation)을 호출하고
@@ -139,8 +194,14 @@ def call_tour_api(operation: str, extra_params: dict) -> list:
     url = f"{BASE_URL}/{operation}"
 
     try:
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()  # HTTP 오류가 있으면 예외 발생
+        # 공공데이터포털 서버가 느릴 때가 있어 자동으로 몇 번 재시도합니다.
+        response = request_with_retry(url, params, timeout=20, retries=2)
+    except requests.exceptions.Timeout:
+        st.error(
+            "⏱️ 공공데이터포털 서버 응답이 지연되고 있습니다 (여러 번 재시도했지만 실패했습니다). "
+            "잠시 후 '조회' 버튼을 다시 눌러주세요."
+        )
+        return []
     except requests.exceptions.RequestException as e:
         st.error(f"API 요청 중 오류가 발생했습니다: {e}")
         return []
@@ -204,8 +265,7 @@ def fetch_area_code_items_silent(area_code: str = None) -> list:
         params["areaCode"] = area_code
 
     try:
-        response = requests.get(f"{BASE_URL}/areaCode2", params=params, timeout=10)
-        response.raise_for_status()
+        response = request_with_retry(f"{BASE_URL}/areaCode2", params, timeout=20, retries=2)
         data = response.json()
         body = data["response"]["body"]
         items = body.get("items")
@@ -248,13 +308,13 @@ def geocode_region(sido_name: str, sigungu_name: str = ""):
     """
     query = f"대한민국 {sido_name} {sigungu_name}".strip()
     try:
-        response = requests.get(
+        response = request_with_retry(
             "https://nominatim.openstreetmap.org/search",
             params={"q": query, "format": "json", "limit": 1, "countrycodes": "kr"},
             headers={"User-Agent": "streamlit-tour-dashboard (educational use)"},
-            timeout=10,
+            timeout=15,
+            retries=1,
         )
-        response.raise_for_status()
         results = response.json()
         if results:
             lat = float(results[0]["lat"])
@@ -343,15 +403,27 @@ tab_festival, tab_stay, tab_detail = st.tabs(
 # ===========================================================
 with tab_festival:
     st.subheader(f"'{location_label}' 지역의 행사정보")
+    st.caption("날짜를 직접 입력하는 대신, 연도와 계절을 선택하면 해당 기간의 행사정보를 조회합니다.")
 
-    # 행사 시작일 기본값: 오늘 날짜
-    event_start_date = st.date_input("행사 시작일(이후) 검색 기준", value=pd.Timestamp.today())
-    event_start_str = event_start_date.strftime("%Y%m%d")
+    col_year, col_season = st.columns(2)
+
+    # 연도 선택 (작년 ~ 내년+1 범위로 제공, 기본값은 올해)
+    current_year = pd.Timestamp.today().year
+    year_options = list(range(current_year - 1, current_year + 3))
+    selected_year = col_year.selectbox("연도를 선택하세요", year_options, index=year_options.index(current_year))
+
+    # 계절 선택
+    selected_season = col_season.selectbox("계절을 선택하세요", list(SEASON_MONTHS.keys()))
+
+    # 선택한 연도 + 계절을 실제 날짜 범위로 변환 (겨울은 다음 해 2월까지 자동 계산)
+    season_start, season_end = get_season_date_range(selected_year, selected_season)
+    st.caption(f"📅 조회 기간: {season_start.strftime('%Y년 %m월 %d일')} ~ {season_end.strftime('%Y년 %m월 %d일')}")
 
     if st.button("행사정보 조회", key="btn_festival"):
         params = {
             "areaCode": selected_sido_code,
-            "eventStartDate": event_start_str,
+            "eventStartDate": season_start.strftime("%Y%m%d"),
+            "eventEndDate": season_end.strftime("%Y%m%d"),
             "arrange": "A",  # A: 제목순 정렬
         }
         # 시/군/구까지 선택한 경우에만 sigunguCode를 추가합니다.
@@ -365,9 +437,13 @@ with tab_festival:
             df = pd.DataFrame(festival_items)
             # 화면에 보여줄 주요 컬럼만 정리 (없는 컬럼은 자동으로 무시)
             show_cols = [c for c in ["title", "eventstartdate", "eventenddate", "addr1", "tel"] if c in df.columns]
+            # 행사 시작일 순으로 정렬해서 보여줍니다.
+            if "eventstartdate" in df.columns:
+                df = df.sort_values("eventstartdate")
             st.dataframe(df[show_cols], use_container_width=True)
+            st.caption(f"총 {len(df)}건의 행사가 {selected_season.split(' ')[1]}({selected_year}년 기준) 기간에 조회되었습니다.")
         else:
-            st.info("조회된 행사정보가 없습니다.")
+            st.info("해당 계절 기간에 조회된 행사정보가 없습니다.")
 
 
 # ===========================================================
