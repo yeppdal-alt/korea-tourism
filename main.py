@@ -385,14 +385,18 @@ else:
             sido_df["월"] = sido_df["baseYmd"].astype(str).str[4:6].astype(int)
             sido_df["계절"] = sido_df["월"].map(MONTH_TO_SEASON)
 
+            # 관광객 통계를 보려는 것이므로, 그 지역에 사는 "현지인"은 빼고
+            # "외지인(다른 지역에서 온 국내 관광객)"과 "외국인"만 남깁니다.
+            sido_df = sido_df[sido_df["touDivNm"].isin(["외지인(b)", "외국인(c)"])].copy()
+
             if not is_sigungu_view:
                 # -------- 시/도만 선택: 소속 시/군/구 전체를 자동으로 비교 --------
                 st.caption(
                     f"'{selected_sido_name}'에 속한 시/군/구별 방문객수를 "
-                    "현지인/외지인/외국인 구분으로 자동으로 비교해서 보여줍니다."
+                    "외지인/외국인 구분으로 자동으로 비교해서 보여줍니다. (현지인 데이터는 제외)"
                 )
 
-                # 시/군/구 x 관광객구분(현지인/외지인/외국인)별로 합산합니다 (계절은 합쳐서 연간 합계로 봅니다).
+                # 시/군/구 x 관광객구분(외지인/외국인)별로 합산합니다 (계절은 합쳐서 연간 합계로 봅니다).
                 group_summary = sido_df.groupby(["signguNm", "touDivNm"], as_index=False)["touNum"].sum()
                 # 방문객수 총합이 많은 시/군/구부터 보이도록 정렬합니다.
                 sigungu_order = (
@@ -407,7 +411,7 @@ else:
                     barmode="stack",
                     category_orders={"signguNm": sigungu_order},
                     labels={"touNum": "방문객수(명)", "signguNm": "시/군/구", "touDivNm": "관광객 구분"},
-                    title=f"{selected_sido_name} 시/군/구별 '25년 방문자수 (현지인·외지인·외국인)",
+                    title=f"{selected_sido_name} 시/군/구별 '25년 방문자수 (외지인·외국인)",
                 )
                 fig.update_layout(
                     margin=dict(l=10, r=10, t=50, b=10),
@@ -428,7 +432,9 @@ else:
                 if region_df.empty:
                     st.info("선택한 지역의 방문객수 데이터를 찾을 수 없습니다.")
                 else:
-                    # 계절 x 관광객구분(현지인/외지인/외국인)별로 합산합니다.
+                    st.caption("현지인 데이터는 제외하고, 외지인/외국인 방문객수만 집계합니다.")
+
+                    # 계절 x 관광객구분(외지인/외국인)별로 합산합니다.
                     season_summary = region_df.groupby(["계절", "touDivNm"], as_index=False)["touNum"].sum()
 
                     fig = px.bar(
