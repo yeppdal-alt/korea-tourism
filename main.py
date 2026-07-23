@@ -656,7 +656,51 @@ else:
             month_total["월"] = month_total["월"].astype(str) + "월"
             # 천단위 구분기호를 넣고 소수점은 표시하지 않습니다.
             month_total["총 방문객수(명)"] = month_total["touNum"].round(0).astype(int).map(lambda n: f"{n:,}")
-            st.dataframe(month_total[["계절", "월", "총 방문객수(명)"]], use_container_width=True, hide_index=True)
+
+            # st.dataframe은 같은 값이어도 셀을 하나로 합쳐(rowspan) 보여줄 수 없어서,
+            # 계절이 바뀔 때만 "계절" 칸을 표시하고 나머지는 rowspan으로 이어붙이는 HTML 표를 직접 만듭니다.
+            season_row_counts = month_total.groupby("계절", sort=False).size().to_dict()
+            table_rows_html = []
+            last_season_shown = None
+            for _, row in month_total.iterrows():
+                season = row["계절"]
+                if season != last_season_shown:
+                    rowspan = season_row_counts[season]
+                    season_cell = (
+                        f'<td rowspan="{rowspan}" '
+                        f'style="text-align:center; vertical-align:middle; font-weight:600;">{season}</td>'
+                    )
+                    last_season_shown = season
+                else:
+                    season_cell = ""  # 이미 위 행에서 rowspan으로 합쳐졌으므로 셀을 생략합니다.
+
+                table_rows_html.append(
+                    "<tr>"
+                    f"{season_cell}"
+                    f'<td style="text-align:center;">{row["월"]}</td>'
+                    f'<td style="text-align:right;">{row["총 방문객수(명)"]}</td>'
+                    "</tr>"
+                )
+
+            season_table_html = f"""
+            <style>
+                .season-visitor-table {{ width:100%; border-collapse: collapse; font-size: 14px; }}
+                .season-visitor-table th, .season-visitor-table td {{
+                    border: 1px solid rgba(128,128,128,0.3);
+                    padding: 6px 10px;
+                }}
+                .season-visitor-table th {{ background-color: rgba(128,128,128,0.15); }}
+            </style>
+            <table class="season-visitor-table">
+                <thead>
+                    <tr><th>계절</th><th>월</th><th>총 방문객수(명)</th></tr>
+                </thead>
+                <tbody>
+                    {''.join(table_rows_html)}
+                </tbody>
+            </table>
+            """
+            st.markdown(season_table_html, unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------
